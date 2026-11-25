@@ -1,0 +1,6 @@
+{
+  "name": "S7wari",
+  "description": "Editorial Workspace for AI-powered long-form article rewriting, automatic pagination, and WordPress publishing.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

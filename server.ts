@@ -1,3 +1,4 @@
+import { execSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -40,12 +41,19 @@ import type { ArticleImage, ArticlePage, EditorialJob, PipelineStage, WordPressS
 dotenv.config();
 
 const PORT = Number(process.env.PORT) || 3000;
+const selfFile = path.basename(fileURLToPath(import.meta.url));
 const entryFile = path.basename(process.argv[1] || '');
-const isCompiledEntry = entryFile.endsWith('.mjs') || entryFile.endsWith('.js');
+const isCompiledEntry =
+  selfFile.endsWith('.js') ||
+  selfFile.endsWith('.mjs') ||
+  entryFile.endsWith('.js') ||
+  entryFile.endsWith('.mjs');
 const isProduction = process.env.NODE_ENV === 'production' || isCompiledEntry;
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
-const ROOT_DIR = fs.existsSync(path.resolve(process.cwd(), 'package.json'))
+const ROOT_DIR = fs.existsSync(path.resolve(currentDir, 'package.json'))
+  ? currentDir
+  : fs.existsSync(path.resolve(process.cwd(), 'package.json'))
   ? process.cwd()
   : currentDir;
 
@@ -944,20 +952,50 @@ async function startServer(): Promise<void> {
     });
     app.use(vite.middlewares);
   } else {
-    const distDir = path.resolve(ROOT_DIR, 'dist');
-    const indexHtml = path.resolve(distDir, 'index.html');
-    if (fs.existsSync(indexHtml)) {
-      app.use(express.static(distDir));
-      app.get('*', (req: Request, res: Response) => {
-        if (req.path.startsWith('/api/')) {
-          res.status(404).json({ error: 'API endpoint not found.' });
-          return;
-        }
-        res.sendFile(indexHtml);
-      });
-    } else {
-      console.warn(`Warning: Built frontend not found at ${indexHtml}. Run "npm run build" first.`);
+    const candidateDistDirs = [
+      path.resolve(currentDir, 'dist'),
+      path.resolve(ROOT_DIR, 'dist'),
+      path.resolve(process.cwd(), 'dist'),
+    ];
+    let distDir =
+      candidateDistDirs.find((dir) => fs.existsSync(path.resolve(dir, 'index.html'))) ??
+      path.resolve(ROOT_DIR, 'dist');
+    let indexHtml = path.resolve(distDir, 'index.html');
+
+    if (!fs.existsSync(indexHtml)) {
+      console.warn(`Built frontend not found at ${indexHtml}. Attempting "npx vite build"...`);
+      try {
+        execSync('npx vite build', { cwd: ROOT_DIR, stdio: 'inherit' });
+        distDir =
+          candidateDistDirs.find((dir) => fs.existsSync(path.resolve(dir, 'index.html'))) ??
+          path.resolve(ROOT_DIR, 'dist');
+        indexHtml = path.resolve(distDir, 'index.html');
+      } catch (err) {
+        console.error('Automatic frontend build failed:', err);
+      }
     }
+
+    app.use(express.static(distDir));
+
+    app.get('/', (_req: Request, res: Response) => {
+      if (!fs.existsSync(indexHtml)) {
+        res.status(500).send('Frontend build not found (dist/index.html missing). Please run "npm run build".');
+        return;
+      }
+      res.sendFile(indexHtml);
+    });
+
+    app.get('*', (req: Request, res: Response) => {
+      if (req.path.startsWith('/api/')) {
+        res.status(404).json({ error: 'API endpoint not found.' });
+        return;
+      }
+      if (!fs.existsSync(indexHtml)) {
+        res.status(500).send('Frontend build not found (dist/index.html missing). Please run "npm run build".');
+        return;
+      }
+      res.sendFile(indexHtml);
+    });
   }
 
   app.listen(PORT, '0.0.0.0', () => {

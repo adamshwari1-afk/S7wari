@@ -9,6 +9,7 @@ const STORE_PATH = path.resolve(DATA_DIR, 's7wari.json');
 
 const DEFAULT_STORE: StoreSchema = {
   owner: null,
+  users: [],
   sites: [],
   jobs: [],
   settings: {
@@ -34,6 +35,7 @@ export async function readStore(): Promise<StoreSchema> {
     const parsed = JSON.parse(raw) as Partial<StoreSchema>;
     return {
       owner: parsed.owner ?? null,
+      users: Array.isArray(parsed.users) ? parsed.users : [],
       sites: Array.isArray(parsed.sites) ? parsed.sites : [],
       jobs: Array.isArray(parsed.jobs) ? parsed.jobs : [],
       settings: {

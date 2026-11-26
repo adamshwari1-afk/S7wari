@@ -131,6 +131,7 @@ export interface AppSettings {
 
 export interface StoreSchema {
   owner: OwnerCredentials | null;
+  users?: OwnerCredentials[];
   sites: WordPressSite[];
   jobs: EditorialJob[];
   settings: AppSettings;

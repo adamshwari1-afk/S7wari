@@ -1,16 +1,19 @@
 import { execSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 import express from 'express';
 import type { Request, Response } from 'express';
 import {
+  AuthConflictError,
   authenticateOwner,
   claimInitialOwner,
   extractBearerToken,
   getAuthStatus,
+  registerUser,
   requireAuth,
   revokeSessionToken,
   updateOwnerCredentials,
@@ -110,6 +113,21 @@ async function startServer(): Promise<void> {
     }
   });
 
+  app.post('/api/auth/register', async (req: Request, res: Response) => {
+    try {
+      const { email, password } = req.body as { email?: string; password?: string };
+      if (!email || !password) {
+        res.status(400).json({ error: 'Email and password are required.' });
+        return;
+      }
+      const result = await registerUser(email, password);
+      res.json(result);
+    } catch (err) {
+      const status = err instanceof AuthConflictError ? 409 : 400;
+      res.status(status).json({ error: err instanceof Error ? err.message : 'Account registration failed.' });
+    }
+  });
+
   app.post('/api/auth/login', async (req: Request, res: Response) => {
     try {
       const { email, password } = req.body as { email?: string; password?: string };
@@ -145,7 +163,13 @@ async function startServer(): Promise<void> {
         res.status(400).json({ error: 'Current password and email are required.' });
         return;
       }
-      const updated = await updateOwnerCredentials(currentPassword, newEmail, newPassword?.trim() || undefined);
+      const actingEmail = (req as Request & { userEmail?: string }).userEmail;
+      const updated = await updateOwnerCredentials(
+        currentPassword,
+        newEmail,
+        newPassword?.trim() || undefined,
+        actingEmail
+      );
       res.json(updated);
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : 'Could not update credentials.' });
@@ -952,10 +976,12 @@ async function startServer(): Promise<void> {
     });
     app.use(vite.middlewares);
   } else {
+    const tmpDistDir = path.resolve(os.tmpdir(), 's7wari-dist');
     const candidateDistDirs = [
       path.resolve(currentDir, 'dist'),
       path.resolve(ROOT_DIR, 'dist'),
       path.resolve(process.cwd(), 'dist'),
+      tmpDistDir,
     ];
     let distDir =
       candidateDistDirs.find((dir) => fs.existsSync(path.resolve(dir, 'index.html'))) ??
@@ -963,16 +989,25 @@ async function startServer(): Promise<void> {
     let indexHtml = path.resolve(distDir, 'index.html');
 
     if (!fs.existsSync(indexHtml)) {
-      console.warn(`Built frontend not found at ${indexHtml}. Attempting "npx vite build"...`);
+      const localViteBin = path.resolve(ROOT_DIR, 'node_modules', 'vite', 'bin', 'vite.js');
+      const viteCmdPrefix = fs.existsSync(localViteBin)
+        ? `"${process.execPath}" "${localViteBin}" build`
+        : 'npx vite build';
+
       try {
-        execSync('npx vite build', { cwd: ROOT_DIR, stdio: 'inherit' });
-        distDir =
-          candidateDistDirs.find((dir) => fs.existsSync(path.resolve(dir, 'index.html'))) ??
-          path.resolve(ROOT_DIR, 'dist');
-        indexHtml = path.resolve(distDir, 'index.html');
-      } catch (err) {
-        console.error('Automatic frontend build failed:', err);
+        execSync(viteCmdPrefix, { cwd: ROOT_DIR, stdio: 'inherit' });
+      } catch {
+        try {
+          execSync(`${viteCmdPrefix} --outDir "${tmpDistDir}"`, { cwd: ROOT_DIR, stdio: 'inherit' });
+        } catch (err) {
+          console.error(`Built frontend not found at ${indexHtml} and automatic build failed:`, err);
+        }
       }
+
+      distDir =
+        candidateDistDirs.find((dir) => fs.existsSync(path.resolve(dir, 'index.html'))) ??
+        path.resolve(ROOT_DIR, 'dist');
+      indexHtml = path.resolve(distDir, 'index.html');
     }
 
     app.use(express.static(distDir));

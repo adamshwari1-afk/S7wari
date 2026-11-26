@@ -55,15 +55,24 @@ export async function getAuthStatus(): Promise<{
   };
 }
 
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+export class AuthConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AuthConflictError';
+  }
+}
+
 export async function claimInitialOwner(email: string, password: string): Promise<{ token: string; email: string }> {
   if (isEnvOwnerConfigured()) {
     throw new Error('Owner credentials are managed by environment variables.');
   }
   const cleanEmail = email.trim().toLowerCase();
-  if (!cleanEmail || !cleanEmail.includes('@')) {
+  if (!cleanEmail || cleanEmail.length > 254 || !EMAIL_REGEX.test(cleanEmail)) {
     throw new Error('Please enter a valid email address.');
   }
-  if (password.length < 8) {
+  if (password.length < 8 || password.length > 256) {
     throw new Error('Password must be at least 8 characters long.');
   }
 
@@ -83,62 +92,156 @@ export async function claimInitialOwner(email: string, password: string): Promis
   return { token: signSessionToken(cleanEmail), email: cleanEmail };
 }
 
+export async function registerUser(email: string, password: string): Promise<{ token: string; email: string }> {
+  const cleanEmail = email.trim().toLowerCase();
+  if (!cleanEmail || cleanEmail.length > 254 || !EMAIL_REGEX.test(cleanEmail)) {
+    throw new Error('Please enter a valid email address.');
+  }
+  if (password.length < 8 || password.length > 256) {
+    throw new Error('Password must be at least 8 characters long.');
+  }
+
+  await updateStore((draft) => {
+    const envEmail = isEnvOwnerConfigured() ? (process.env.OWNER_EMAIL?.trim().toLowerCase() || '') : '';
+    const existingUsers = draft.users ?? [];
+    const existsInEnv = Boolean(envEmail && timingSafeTextEqual(cleanEmail, envEmail));
+    const existsAsOwner = Boolean(draft.owner && timingSafeTextEqual(cleanEmail, draft.owner.email.toLowerCase()));
+    const existsInUsers = existingUsers.some((user) => timingSafeTextEqual(cleanEmail, user.email.toLowerCase()));
+
+    if (existsInEnv || existsAsOwner || existsInUsers) {
+      throw new AuthConflictError('An account with this email already exists. Please sign in.');
+    }
+
+    const { hash, salt } = hashPassword(password);
+    draft.users = [
+      ...existingUsers,
+      {
+        email: cleanEmail,
+        passwordHash: hash,
+        salt,
+        updatedAt: new Date().toISOString(),
+      },
+    ];
+  });
+
+  return { token: signSessionToken(cleanEmail), email: cleanEmail };
+}
+
 export async function authenticateOwner(email: string, password: string): Promise<{ token: string; email: string } | null> {
   const cleanEmail = email.trim().toLowerCase();
+  if (!cleanEmail || !password) return null;
 
   if (isEnvOwnerConfigured()) {
     const envPass = process.env.OWNER_PASSWORD!.trim();
     const envEmail = (process.env.OWNER_EMAIL?.trim() || '').toLowerCase();
     const emailOk = envEmail ? timingSafeTextEqual(cleanEmail, envEmail) : cleanEmail.length > 0;
     const passOk = timingSafeTextEqual(password, envPass);
-    if (!emailOk || !passOk) return null;
-    const resolvedEmail = envEmail || cleanEmail;
-    return { token: signSessionToken(resolvedEmail), email: resolvedEmail };
+    if (emailOk && passOk) {
+      const resolvedEmail = envEmail || cleanEmail;
+      return { token: signSessionToken(resolvedEmail), email: resolvedEmail };
+    }
   }
 
   const store = await readStore();
-  if (!store.owner) return null;
-  if (!timingSafeTextEqual(cleanEmail, store.owner.email.toLowerCase())) return null;
-  if (!verifyPassword(password, store.owner.passwordHash, store.owner.salt)) return null;
+  if (
+    store.owner &&
+    timingSafeTextEqual(cleanEmail, store.owner.email.toLowerCase()) &&
+    verifyPassword(password, store.owner.passwordHash, store.owner.salt)
+  ) {
+    return { token: signSessionToken(store.owner.email), email: store.owner.email };
+  }
 
-  return { token: signSessionToken(store.owner.email), email: store.owner.email };
+  for (const user of store.users ?? []) {
+    if (
+      timingSafeTextEqual(cleanEmail, user.email.toLowerCase()) &&
+      verifyPassword(password, user.passwordHash, user.salt)
+    ) {
+      return { token: signSessionToken(user.email), email: user.email };
+    }
+  }
+
+  return null;
 }
 
 export async function updateOwnerCredentials(
   currentPassword: string,
   newEmail: string,
-  newPassword?: string
+  newPassword?: string,
+  actingEmail?: string
 ): Promise<{ email: string }> {
-  if (isEnvOwnerConfigured()) {
-    throw new Error('Credentials are managed via environment secrets and cannot be changed in the UI.');
-  }
-  const cleanEmail = newEmail.trim().toLowerCase();
-  if (!cleanEmail || !cleanEmail.includes('@')) {
+  const cleanNewEmail = newEmail.trim().toLowerCase();
+  if (!cleanNewEmail || cleanNewEmail.length > 254 || !EMAIL_REGEX.test(cleanNewEmail)) {
     throw new Error('Please enter a valid email address.');
   }
-  if (newPassword && newPassword.length < 8) {
+  if (newPassword && (newPassword.length < 8 || newPassword.length > 256)) {
     throw new Error('New password must be at least 8 characters long.');
   }
 
+  const envEmail = isEnvOwnerConfigured() ? (process.env.OWNER_EMAIL?.trim().toLowerCase() || '') : '';
+  const cleanActing = actingEmail?.trim().toLowerCase() || '';
+  if (isEnvOwnerConfigured() && (!cleanActing || !envEmail || timingSafeTextEqual(cleanActing, envEmail))) {
+    throw new Error('Credentials are managed via environment secrets and cannot be changed in the UI.');
+  }
+
   await updateStore((draft) => {
+    const users = draft.users ?? [];
+    const userIndex = cleanActing
+      ? users.findIndex((u) => timingSafeTextEqual(cleanActing, u.email.toLowerCase()))
+      : -1;
+
+    if (userIndex >= 0) {
+      const currentUser = users[userIndex];
+      if (!verifyPassword(currentPassword, currentUser.passwordHash, currentUser.salt)) {
+        throw new Error('Current password is incorrect.');
+      }
+      const conflictWithOwner = Boolean(
+        draft.owner && timingSafeTextEqual(cleanNewEmail, draft.owner.email.toLowerCase())
+      );
+      const conflictWithOtherUser = users.some(
+        (u, idx) => idx !== userIndex && timingSafeTextEqual(cleanNewEmail, u.email.toLowerCase())
+      );
+      const conflictWithEnv = Boolean(envEmail && timingSafeTextEqual(cleanNewEmail, envEmail));
+      if (conflictWithOwner || conflictWithOtherUser || conflictWithEnv) {
+        throw new Error('That email is already used by another account.');
+      }
+      const nextCreds = newPassword
+        ? hashPassword(newPassword)
+        : { hash: currentUser.passwordHash, salt: currentUser.salt };
+      users[userIndex] = {
+        email: cleanNewEmail,
+        passwordHash: nextCreds.hash,
+        salt: nextCreds.salt,
+        updatedAt: new Date().toISOString(),
+      };
+      draft.users = users;
+      return;
+    }
+
+    if (isEnvOwnerConfigured()) {
+      throw new Error('Credentials are managed via environment secrets and cannot be changed in the UI.');
+    }
     if (!draft.owner) {
       throw new Error('Owner account is not initialized.');
     }
     if (!verifyPassword(currentPassword, draft.owner.passwordHash, draft.owner.salt)) {
       throw new Error('Current password is incorrect.');
     }
+    const conflictWithUsers = users.some((u) => timingSafeTextEqual(cleanNewEmail, u.email.toLowerCase()));
+    if (conflictWithUsers) {
+      throw new Error('That email is already used by another account.');
+    }
     const nextCreds = newPassword
       ? hashPassword(newPassword)
       : { hash: draft.owner.passwordHash, salt: draft.owner.salt };
     draft.owner = {
-      email: cleanEmail,
+      email: cleanNewEmail,
       passwordHash: nextCreds.hash,
       salt: nextCreds.salt,
       updatedAt: new Date().toISOString(),
     };
   });
 
-  return { email: cleanEmail };
+  return { email: cleanNewEmail };
 }
 
 export function signSessionToken(email: string): string {

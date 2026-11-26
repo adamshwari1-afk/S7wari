@@ -31,7 +31,7 @@ async function apiFetch<T>(url: string, init: RequestInit = {}): Promise<T> {
   }
 
   const res = await fetch(url, { ...init, headers });
-  if (res.status === 401 && url !== '/api/auth/login') {
+  if (res.status === 401 && url !== '/api/auth/login' && url !== '/api/auth/register') {
     memoryToken = null;
     onUnauthorizedCallback?.();
   }
@@ -114,6 +114,11 @@ export const api = {
   getAuthStatus: () => apiFetch<AuthStatus>('/api/auth/status'),
   setupOwner: (email: string, password: string) =>
     apiFetch<{ token: string; email: string }>('/api/auth/setup', {
+      method: 'POST',
+      body: JSON.stringify({ email, password }),
+    }),
+  register: (email: string, password: string) =>
+    apiFetch<{ token: string; email: string }>('/api/auth/register', {
       method: 'POST',
       body: JSON.stringify({ email, password }),
     }),

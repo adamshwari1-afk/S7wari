@@ -1,6 +1,8 @@
 // server.ts
+import { execSync } from "node:child_process";
 import crypto2 from "node:crypto";
 import fs2 from "node:fs";
+import os from "node:os";
 import path2 from "node:path";
 import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
@@ -2658,11 +2660,12 @@ async function publishPostToWordPress(site, params) {
 // server.ts
 dotenv.config();
 var PORT = Number(process.env.PORT) || 3e3;
+var selfFile = path2.basename(fileURLToPath(import.meta.url));
 var entryFile = path2.basename(process.argv[1] || "");
-var isCompiledEntry = entryFile.endsWith(".mjs") || entryFile.endsWith(".js");
+var isCompiledEntry = selfFile.endsWith(".js") || selfFile.endsWith(".mjs") || entryFile.endsWith(".js") || entryFile.endsWith(".mjs");
 var isProduction = process.env.NODE_ENV === "production" || isCompiledEntry;
 var currentDir = path2.dirname(fileURLToPath(import.meta.url));
-var ROOT_DIR = fs2.existsSync(path2.resolve(process.cwd(), "package.json")) ? process.cwd() : currentDir;
+var ROOT_DIR = fs2.existsSync(path2.resolve(currentDir, "package.json")) ? currentDir : fs2.existsSync(path2.resolve(process.cwd(), "package.json")) ? process.cwd() : currentDir;
 function sendSse(res, event, data) {
   res.write(`event: ${event}
 data: ${JSON.stringify(data)}
@@ -3399,20 +3402,49 @@ ${html}`;
     });
     app.use(vite.middlewares);
   } else {
-    const distDir = path2.resolve(ROOT_DIR, "dist");
-    const indexHtml = path2.resolve(distDir, "index.html");
-    if (fs2.existsSync(indexHtml)) {
-      app.use(express.static(distDir));
-      app.get("*", (req, res) => {
-        if (req.path.startsWith("/api/")) {
-          res.status(404).json({ error: "API endpoint not found." });
-          return;
+    const tmpDistDir = path2.resolve(os.tmpdir(), "s7wari-dist");
+    const candidateDistDirs = [
+      path2.resolve(currentDir, "dist"),
+      path2.resolve(ROOT_DIR, "dist"),
+      path2.resolve(process.cwd(), "dist"),
+      tmpDistDir
+    ];
+    let distDir = candidateDistDirs.find((dir) => fs2.existsSync(path2.resolve(dir, "index.html"))) ?? path2.resolve(ROOT_DIR, "dist");
+    let indexHtml = path2.resolve(distDir, "index.html");
+    if (!fs2.existsSync(indexHtml)) {
+      const localViteBin = path2.resolve(ROOT_DIR, "node_modules", "vite", "bin", "vite.js");
+      const viteCmdPrefix = fs2.existsSync(localViteBin) ? `"${process.execPath}" "${localViteBin}" build` : "npx vite build";
+      try {
+        execSync(viteCmdPrefix, { cwd: ROOT_DIR, stdio: "inherit" });
+      } catch {
+        try {
+          execSync(`${viteCmdPrefix} --outDir "${tmpDistDir}"`, { cwd: ROOT_DIR, stdio: "inherit" });
+        } catch (err) {
+          console.error(`Built frontend not found at ${indexHtml} and automatic build failed:`, err);
         }
-        res.sendFile(indexHtml);
-      });
-    } else {
-      console.warn(`Warning: Built frontend not found at ${indexHtml}. Run "npm run build" first.`);
+      }
+      distDir = candidateDistDirs.find((dir) => fs2.existsSync(path2.resolve(dir, "index.html"))) ?? path2.resolve(ROOT_DIR, "dist");
+      indexHtml = path2.resolve(distDir, "index.html");
     }
+    app.use(express.static(distDir));
+    app.get("/", (_req, res) => {
+      if (!fs2.existsSync(indexHtml)) {
+        res.status(500).send('Frontend build not found (dist/index.html missing). Please run "npm run build".');
+        return;
+      }
+      res.sendFile(indexHtml);
+    });
+    app.get("*", (req, res) => {
+      if (req.path.startsWith("/api/")) {
+        res.status(404).json({ error: "API endpoint not found." });
+        return;
+      }
+      if (!fs2.existsSync(indexHtml)) {
+        res.status(500).send('Frontend build not found (dist/index.html missing). Please run "npm run build".');
+        return;
+      }
+      res.sendFile(indexHtml);
+    });
   }
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`S7wari server listening on http://0.0.0.0:${PORT} (${isProduction ? "production" : "development"})`);
